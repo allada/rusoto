@@ -6,6 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 (Please put changes here.)
+- MockRequestDispatcher::with_request_checker now takes owned object callback
 
 ## [0.47.0] - 2021-06-29
 
