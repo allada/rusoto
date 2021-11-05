@@ -34,11 +34,12 @@
 #![deny(missing_docs)]
 use std::fs::File;
 use std::io::Read;
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::FutureExt;
+use futures::{FutureExt, Future};
 use http::{header::HeaderName, HeaderMap, StatusCode};
 use rusoto_core::credential::{AwsCredentials, ProvideAwsCredentials};
 use rusoto_core::request::HttpResponse;
@@ -72,7 +73,7 @@ pub struct MockRequestDispatcher {
     outcome: RequestOutcome,
     body: Vec<u8>,
     headers: HeaderMap<String>,
-    request_checker: Option<Box<dyn Fn(SignedRequest) + Send + Sync>>,
+    request_checker: Option<Box<dyn Fn(SignedRequest) -> Pin<Box<dyn Future<Output = ()> + Sync + Send + 'static>> + 'static>>,
 }
 
 enum RequestOutcome {
@@ -125,7 +126,7 @@ impl MockRequestDispatcher {
     /// to AWS
     pub fn with_request_checker<F>(mut self, checker: F) -> MockRequestDispatcher
     where
-        F: Fn(SignedRequest) + Send + Sync + 'static,
+        F: Fn(SignedRequest) -> Pin<Box<dyn Future<Output = ()> + Sync + Send>> + 'static,
     {
         self.request_checker = Some(Box::new(checker));
         self
@@ -139,24 +140,28 @@ impl MockRequestDispatcher {
     }
 }
 
+// use futures::FutureExt;
+
 impl DispatchSignedRequest for MockRequestDispatcher {
     fn dispatch(
         &self,
         request: SignedRequest,
         _timeout: Option<Duration>,
     ) -> rusoto_core::request::DispatchSignedRequestFuture {
-        if self.request_checker.is_some() {
-            self.request_checker.as_ref().unwrap()(request);
-        }
-        match self.outcome {
-            RequestOutcome::Performed(ref status) => futures::future::ready(Ok(HttpResponse {
+        let fut = if self.request_checker.is_some() {
+            self.request_checker.as_ref().unwrap()(request)
+        } else {
+            futures::future::ready(()).boxed()
+        };
+        let result = match self.outcome {
+            RequestOutcome::Performed(ref status) => Ok(HttpResponse {
                 status: *status,
                 body: ByteStream::from(self.body.clone()),
                 headers: self.headers.clone(),
-            }))
-            .boxed(),
-            RequestOutcome::Failed(ref error) => futures::future::ready(Err(error.clone())).boxed(),
-        }
+            }),
+            RequestOutcome::Failed(ref error) => Err(error.clone()),
+        };
+        fut.map(|_| result).boxed()
     }
 }
 
